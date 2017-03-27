@@ -826,6 +826,7 @@ type TxTest struct {
 
 type TestGrp struct {
 	SQLStr          string                   // SQL Select filds for the group.
+	EmptyRowStr     string                   // SQL group empty SQL row string
 	SQLPeriodIdx    map[string]*PeriodIdx    // SQL period index for a particular period, keyed by peroid string
 	SQLColIdx       int                      // latest index of the SQL column
 	SQLColPeriodIdx int                      // latest index of the SQL column period
@@ -999,6 +1000,7 @@ func buildTestGrp(tBaseGrp *TestGrp, addTests []string) error {
 					iCol := tBaseGrp.SQLColIdx // Current group column index
 					if len(tBaseGrp.SQLStr) == 0 {
 						tBaseGrp.SQLStr += para.SqlColStr
+						tBaseGrp.EmptyRowStr += "0"
 						tBaseGrp.SQLColIdx++
 					} else {
 						i := strings.Index(tBaseGrp.SQLStr, para.SqlColStr) // check if column already exists
@@ -1006,6 +1008,7 @@ func buildTestGrp(tBaseGrp *TestGrp, addTests []string) error {
 							iCol = strings.Count(tBaseGrp.SQLStr[:i], ",")
 						} else {
 							tBaseGrp.SQLStr += "," + para.SqlColStr
+							tBaseGrp.EmptyRowStr += ",0"
 							tBaseGrp.SQLColIdx++
 						}
 					}
@@ -1255,7 +1258,7 @@ func processTx(txInput *TxInput) string {
 		go func(tRes *[]TestRes) {
 			tt := time.Now()
 			*tRes = append(*tRes, processCustTests(&txFilterGrp.CustTestGrp, rTxResult.CustID, rTxResult.AcctID, t, txInput)...)
-			fmt.Printf("\ntime ResCustAgg:%+v", time.Since(tt))
+			fmt.Printf("\ntime ResCustTest:%+v", time.Since(tt))
 			wg.Done()
 		}(&tResCustGrp)
 
@@ -1263,7 +1266,7 @@ func processTx(txInput *TxInput) string {
 		go func(tRes *[]TestRes) {
 			tt := time.Now()
 			*tRes = append(*tRes, processAcctTests(&txFilterGrp.AcctTestGrp, rTxResult.CustID, rTxResult.AcctID, t, txInput)...)
-			fmt.Printf("\ntime ResAccAgg:%+v", time.Since(tt))
+			fmt.Printf("\ntime ResAccTests:%+v", time.Since(tt))
 			wg.Done()
 		}(&tResAcctGrp)
 
@@ -1387,11 +1390,13 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 				case 9: // aggregate type
 					wg1.Add(1)
 					go func(i1 int, tst string) {
+						t2 := time.Now()
 						sqlstm := "SELECT " + txTestCache[tst].Params[i1].SqlColStr + " FROM TX WHERE idCUST = ? and idTX > ? and " +
 							txTestCache[tst].Params[i1].CName + ">0"
 						defer wg1.Done()
-
+						t3 := time.Now()
 						rows, err := db.Query(sqlstm, cID, txTestCache[tst].Period.getBegineTimeNano(t))
+						fmt.Printf("\nTime in Cust SQL Execution: %v, cid:%d, idTX: %d", time.Since(t3), cID, txTestCache[tst].Period.getBegineTimeNano(t))
 						if err != nil {
 							//fmt.Printf("\nmore errors here SQL, custid and time: %s, %d, %d ", sqlstm, cID, txTestCache[tst].Period.getBegineTimeNano(t))
 							panic("\nerror in aggregate SQL result:" + err.Error() + "\n" + sqlstm + fmt.Sprintf(",params:%+v", txTestCache[tst].Params[1]))
@@ -1408,6 +1413,7 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 							TstGrp.TestSups[tst][i1].SqlColValue = 0
 						}
 						rows.Close()
+						fmt.Printf("\nTime in Cust Agg: %v, sql: %s", time.Since(t2), sqlstm)
 						//fmt.Printf("\nSQL err: %v, value:%d, %f, sql:%s, cid%d, tim:e%d\n", err, TstGrp.TestSups[tststr][idx].SqlColValue, avgVal, sqlstm, cID, txTestCache[tststr].Period.getBegineTimeNano(t))
 					}(idx, tststr)
 				case 4: // Sql type
@@ -1454,7 +1460,6 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 					}
 				}
 
-				// fmt.Printf("\nTime Elapse in Cust SQL go:%v", time.Since(t1))
 			}(sqlstr, tststr)
 			// fmt.Printf("\ntstgrp 2:%+v \nCustCash:%+v\ncust att map:%+v", TstGrp, custCache[cID], custAttMap[cID])
 
@@ -1518,20 +1523,23 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 	// get SQL results
 	if len(TstGrp.SQLStr) > 0 {
 		var sqlstm string
-
 		t1 := time.Now()
-
 		ii := 0
+		whereStr := "WHERE idCUST = " + strconv.FormatInt(cID, 10)
+
 		for per, perIdx := range TstGrp.SQLPeriodIdx {
-			sqlstm += "(SELECT " + TstGrp.SQLStr + " FROM TX WHERE idCUST = " + strconv.FormatInt(cID, 10) + " and idTX > " +
-				strconv.FormatInt(perIdx.Period.getBegineTimeNano(t), 10) + " ORDER BY idTX ASC LIMIT 1) UNION "
+			sqlstm += "(SELECT " + TstGrp.SQLStr + " FROM TX " + whereStr + " and idTX > " +
+				strconv.FormatInt(perIdx.Period.getBegineTimeNano(t), 10) + " ORDER BY idTX ASC LIMIT 1) UNION ALL (SELECT " + TstGrp.EmptyRowStr +
+				" FROM (SELECT EXISTS (SELECT 1 FROM TX " + whereStr + " and idTX > " +
+				strconv.FormatInt(perIdx.Period.getBegineTimeNano(t), 10) + " LIMIT 1) as c) as t where t.c = 0) UNION ALL "
+
 			TstGrp.SQLPeriodIdx[per].Idx = ii // set group period index
 			ii++
 		}
 
-		sqlstm = sqlstm[:len(sqlstm)-7] + ";" // remove the UNION at the end
+		sqlstm = sqlstm[:len(sqlstm)-11] + ";" // remove the UNION at the end
 
-		// fmt.Printf("\nsql group sql: %s", sqlstm)
+		fmt.Printf("\nsql group CUST sql: %s", sqlstm)
 		rows, err := db.Query(sqlstm)
 
 		if err != nil {
@@ -1558,11 +1566,11 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 
 		rows.Close()
 
-		// fmt.Printf("\nSql Result sent in channel:%+v", sqlRes)
+		fmt.Printf("\nCust Sql Result sent in channel:%+v", sqlRes)
 		chSqlRes <- sqlRes
 		// fmt.Printf("\nTime SQL:%s", sqlstm)
 
-		fmt.Printf("\ntime elapse in SQL query:%v", time.Since(t1))
+		fmt.Printf("\ntime elapse in Cust SQL query:%v", time.Since(t1))
 
 	}
 	// fmt.Printf("\nGot here, n tests:%d", len(TstGrp.Tests))
@@ -1602,7 +1610,7 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 				switch txTestCache[tststr].Params[idx].QueryType {
 				case 9: // aggregate type
 					wg1.Add(1)
-					go func(i1 int, tst string) {
+					func(i1 int, tst string) {
 						sqlstm := "SELECT " + txTestCache[tst].Params[i1].SqlColStr + " FROM TX WHERE idCUST = ? and idACCT = ? and idTX > ? and " +
 							txTestCache[tst].Params[i1].CName + ">0"
 						defer wg1.Done()
@@ -1648,7 +1656,7 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 				}
 			}
 			wg1.Add(1)
-			go func(sql string, tsts string) {
+			func(sql string, tsts string) {
 				defer wg1.Done()
 
 				//fmt.Printf("\nenter test%s", tsts)
@@ -1736,16 +1744,21 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 		var sqlstm string
 		t1 := time.Now()
 		ii := 0
+		whereStr := "WHERE idCUST = " + strconv.FormatInt(cID, 10) + " and idACCT = " + strconv.FormatInt(aID, 10)
+
 		for per, perIdx := range TstGrp.SQLPeriodIdx {
-			sqlstm += "(SELECT " + TstGrp.SQLStr + " FROM TX WHERE idCUST = " + strconv.FormatInt(cID, 10) + " and idACCT = " + strconv.FormatInt(aID, 10) + " and idTX > " +
-				strconv.FormatInt(perIdx.Period.getBegineTimeNano(t), 10) + " ORDER BY idTX ASC LIMIT 1) UNION "
+			sqlstm += "(SELECT " + TstGrp.SQLStr + " FROM TX " + whereStr + " and idTX > " +
+				strconv.FormatInt(perIdx.Period.getBegineTimeNano(t), 10) + " ORDER BY idTX ASC LIMIT 1) UNION ALL (SELECT " + TstGrp.EmptyRowStr +
+				" FROM (SELECT EXISTS (SELECT 1 FROM TX " + whereStr + " and idTX > " +
+				strconv.FormatInt(perIdx.Period.getBegineTimeNano(t), 10) + " LIMIT 1) as c) as t where t.c = 0) UNION ALL "
+
 			TstGrp.SQLPeriodIdx[per].Idx = ii // set group period index
 			ii++
 		}
 
-		sqlstm = sqlstm[:len(sqlstm)-7] + ";" // remove the UNION at the end
+		sqlstm = sqlstm[:len(sqlstm)-11] + ";" // remove the UNION at the end
 
-		//fmt.Printf("\nsql group sql: %s", sqlstm)
+		fmt.Printf("\nsql group sql: %s", sqlstm)
 		rows, err := db.Query(sqlstm)
 
 		if err != nil {
@@ -1772,10 +1785,9 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 
 		rows.Close()
 
-		//fmt.Printf("\nSql Result sent in channel:%+v", sqlRes)
+		fmt.Printf("\nResult sent in acct SQL channel:%+v", sqlRes)
 		chSqlRes <- sqlRes
-		// fmt.Printf("\nTime SQL:%s", sqlstm)
-		fmt.Printf("\ntime elapse in SQL query:%v", time.Since(t1))
+		fmt.Printf("\ntime elapse in Acct SQL query:%v", time.Since(t1))
 
 	}
 	// fmt.Printf("\nGot here, n tests:%d", len(TstGrp.Tests))
