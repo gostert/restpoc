@@ -24,8 +24,6 @@ import (
 	_ "github.com/Go-SQL-Driver/MySQL" // _ means for side effect of initialization or registration
 	"github.com/Knetic/govaluate"
 	"github.com/jinzhu/now"
-
-	//"github.com/gostert/hftestpkg"
 )
 
 var db *sql.DB
@@ -830,20 +828,15 @@ type TestGrp struct {
 	SQLPeriodIdx    map[string]*PeriodIdx    // SQL period index for a particular period, keyed by peroid string
 	SQLColIdx       int                      // latest index of the SQL column
 	SQLColPeriodIdx int                      // latest index of the SQL column period
-	Tests           []string                 // array of test in the same group
-	TestSups        map[string][]ColParamSup // array of map supp
+	GrpParamIdx     map[string]int           // map of parameter order (index) on the SQL statement keyed by parameter string
+	Tests           map[string]int           // map of active test, keyed by tested name. Int value can be used in the future
+	TestParamValue  map[string][]interface{} // map of column value array corresonding to []Colparam parameter in the test, keyed by test
 	TotalTest       int
 }
 
 type PeriodIdx struct {
 	Period Period
 	Idx    int
-}
-
-// ColParam Supplient structure - a run time structure
-type ColParamSup struct {
-	SqlColIdx   int         // compiled index, not used for aggregate tests for SQL query type
-	SqlColValue interface{} // Value from the SQL statement
 }
 
 type TxFilter struct {
@@ -944,19 +937,31 @@ func initFilters() int {
 	// build global default filter
 	txDefFilterGrp = *new(TxFilterGrp)
 
-	txDefFilterGrp.CustTestGrp.Tests = make([]string, 0)
-	txDefFilterGrp.CustTestGrp.TestSups = make(map[string][]ColParamSup)
+	txDefFilterGrp.CustTestGrp.Tests = make(map[string]int)
+	txDefFilterGrp.CustTestGrp.GrpParamIdx = make(map[string]int)
+	txDefFilterGrp.CustTestGrp.TestParamValue = make(map[string][]interface{})
 	txDefFilterGrp.CustTestGrp.SQLPeriodIdx = make(map[string]*PeriodIdx)
 
-	txDefFilterGrp.AcctTestGrp.Tests = make([]string, 0)
-	txDefFilterGrp.AcctTestGrp.TestSups = make(map[string][]ColParamSup)
+	txDefFilterGrp.AcctTestGrp.Tests = make(map[string]int)
+	txDefFilterGrp.AcctTestGrp.GrpParamIdx = make(map[string]int)
+	txDefFilterGrp.AcctTestGrp.TestParamValue = make(map[string][]interface{})
 	txDefFilterGrp.AcctTestGrp.SQLPeriodIdx = make(map[string]*PeriodIdx)
 
 	for _, filstr := range txDefFilters {
-		err = addToFilterGrp(&txDefFilterGrp, *txFilterCache[filstr])
-		if err != nil {
-			log.Panic("Error building default filter group")
+		if len(txDefFilterGrp.Filters) == 0 {
+			txDefFilterGrp.Filters += txFilterCache[filstr].FName
+		} else {
+			txDefFilterGrp.Filters += "," + txFilterCache[filstr].FName
 		}
+		if len(txDefFilterGrp.ActiveFilters) == 0 {
+			txDefFilterGrp.ActiveFilters += txFilterCache[filstr].FName
+		} else {
+			txDefFilterGrp.ActiveFilters += "," + txFilterCache[filstr].FName
+		}
+
+		buildTestGrp(&txDefFilterGrp.CustTestGrp, txFilterCache[filstr].CustTests)
+		buildTestGrp(&txDefFilterGrp.AcctTestGrp, txFilterCache[filstr].AcctTests)
+
 	}
 
 	fmt.Printf("\nDefault Filters:%+v", txDefFilters)
@@ -966,62 +971,74 @@ func initFilters() int {
 	return i
 }
 
-// Add a new filter to an exist filter group
-func addToFilterGrp(fBase *TxFilterGrp, fAdd TxFilter) error {
-
-	if len(fBase.Filters) == 0 {
-		fBase.Filters += fAdd.FName
-	} else {
-		fBase.Filters += "," + fAdd.FName
-	}
-	if len(fBase.ActiveFilters) == 0 {
-		fBase.ActiveFilters += fAdd.FName
-	} else {
-		fBase.ActiveFilters += "," + fAdd.FName
-	}
-
-	buildTestGrp(&fBase.CustTestGrp, fAdd.CustTests)
-	buildTestGrp(&fBase.AcctTestGrp, fAdd.AcctTests)
-
-	return nil
-}
-
 // Build test group from list of tests
 func buildTestGrp(tBaseGrp *TestGrp, addTests []string) error {
-
+	avgColStr := ""
 	// add to SQLtest group from the filter tests one at a time
 	for _, tst := range addTests {
-		if _, ok := tBaseGrp.TestSups[tst]; !ok {
-			tBaseGrp.Tests = append(tBaseGrp.Tests, tst)
+		if _, ok := tBaseGrp.Tests[tst]; !ok {
+			tBaseGrp.Tests[tst] = 0 // register exist. Actual value can be used in the future
 			tBaseGrp.TotalTest++
-			for _, para := range txTestCache[tst].Params { // going through each parameter in a test
-				colparam := ColParamSup{-1, -1}
-				if para.QueryType == 4 { // only process the logic for SQL types of the parameter
-					iCol := tBaseGrp.SQLColIdx // Current group column index
+			tBaseGrp.TestParamValue[tst] = make([]interface{}, len(txTestCache[tst].Params)) // initialize the value array
+			for _, para := range txTestCache[tst].Params {                                   // going through each parameter in a test
+				if para.QueryType == 4 || para.QueryType == 5 { // only process the logic for SQL types of the parameter
+					// iCol := tBaseGrp.SQLColIdx // Current group column index
 					if len(tBaseGrp.SQLStr) == 0 {
-						tBaseGrp.SQLStr += para.SqlColStr
-						tBaseGrp.EmptyRowStr += "0"
-						tBaseGrp.SQLColIdx++
-					} else {
-						i := strings.Index(tBaseGrp.SQLStr, para.SqlColStr) // check if column already exists
-						if i >= 0 {
-							iCol = strings.Count(tBaseGrp.SQLStr[:i], ",")
+						if para.QueryType == 5 { // process for AVG type parameter
+							if txTestCache[tst].CustOrAcct == "c" {
+								avgColStr = paramColMap["CNT("+para.CName+")"].CustCol
+							} else {
+								avgColStr = paramColMap["CNT("+para.CName+")"].AcctCol
+							}
+							tBaseGrp.SQLStr += para.SqlColStr + "," + avgColStr
+							tBaseGrp.EmptyRowStr += "0,0"
+							tBaseGrp.GrpParamIdx[para.SqlColStr] = tBaseGrp.SQLColIdx
+							tBaseGrp.SQLColIdx++
+							tBaseGrp.GrpParamIdx[avgColStr] = tBaseGrp.SQLColIdx
+							tBaseGrp.SQLColIdx++
 						} else {
-							tBaseGrp.SQLStr += "," + para.SqlColStr
-							tBaseGrp.EmptyRowStr += ",0"
+							tBaseGrp.SQLStr += para.SqlColStr
+							tBaseGrp.EmptyRowStr += "0"
+							tBaseGrp.GrpParamIdx[para.SqlColStr] = tBaseGrp.SQLColIdx
 							tBaseGrp.SQLColIdx++
 						}
+					} else {
+						if _, ok := tBaseGrp.GrpParamIdx[para.SqlColStr]; !ok { // column doesn't exist
+							if para.QueryType == 5 { // process for AVG type parameter
+								if txTestCache[tst].CustOrAcct == "c" {
+									avgColStr = paramColMap["CNT("+para.CName+")"].CustCol
+								} else {
+									avgColStr = paramColMap["CNT("+para.CName+")"].AcctCol
+								}
+								if _, ok := tBaseGrp.GrpParamIdx[avgColStr]; !ok { // if the avg cnt column doesn't exist
+									tBaseGrp.SQLStr += "," + para.SqlColStr + "," + avgColStr
+									tBaseGrp.EmptyRowStr += ",0,0"
+									tBaseGrp.GrpParamIdx[para.SqlColStr] = tBaseGrp.SQLColIdx
+									tBaseGrp.SQLColIdx++
+									tBaseGrp.GrpParamIdx[avgColStr] = tBaseGrp.SQLColIdx
+									tBaseGrp.SQLColIdx++
+								} else {
+									tBaseGrp.SQLStr += "," + para.SqlColStr
+									tBaseGrp.EmptyRowStr += ",0"
+									tBaseGrp.GrpParamIdx[para.SqlColStr] = tBaseGrp.SQLColIdx
+									tBaseGrp.SQLColIdx++
+								}
+							} else {
+								tBaseGrp.SQLStr += "," + para.SqlColStr
+								tBaseGrp.EmptyRowStr += ",0"
+								tBaseGrp.GrpParamIdx[para.SqlColStr] = tBaseGrp.SQLColIdx
+								tBaseGrp.SQLColIdx++
+							}
+						}
 					}
-					colparam.SqlColIdx = iCol
 
-					if para.QueryType == 4 { // only count period for querytype 4
+					if para.QueryType == 4 || para.QueryType == 5 { // only count period for querytype 4 or 5
 						if _, ok := tBaseGrp.SQLPeriodIdx[txTestCache[tst].PeriodStr]; !ok { // column period index
 							tBaseGrp.SQLPeriodIdx[txTestCache[tst].PeriodStr] = &PeriodIdx{txTestCache[tst].Period, -1}
 							tBaseGrp.SQLColPeriodIdx++
 						}
 					}
 				}
-				tBaseGrp.TestSups[tst] = append(tBaseGrp.TestSups[tst], colparam)
 			}
 		}
 	}
@@ -1034,8 +1051,10 @@ func initParamColMaps() int {
 	paramColMap["SUM(amtCredit)"] = ColMap{"SUM(amtCredit)", "totCCredit", "totCredit"}
 	paramColMap["SUM(amtFee)"] = ColMap{"SUM(amtFee)", "totCFee", "totFee"}
 	paramColMap["CNT(*)"] = ColMap{"COUNT(*)", "cntCTot", "cntTot"}
-	paramColMap["CNT(amtDebit)"] = ColMap{"COUNT(*)", "cntCDebit", "cntDebit"}    // add where clause
-	paramColMap["CNT(amtCredit)"] = ColMap{"COUNT(*)", "cntCCredit", "cntCredit"} // add where clause
+	paramColMap["CNT(amtDebit)"] = ColMap{"COUNT(*)", "cntCDebit", "cntDebit"}
+	paramColMap["CNT(amtCredit)"] = ColMap{"COUNT(*)", "cntCCredit", "cntCredit"}
+	paramColMap["AVG(amtDebit)"] = ColMap{"AVG(amtDebit)", "totCDebit", "totDebit"}
+	paramColMap["AVG(amtCredit)"] = ColMap{"AVG(amtCredit)", "totCCredit", "totCredit"}
 	return 1
 }
 
@@ -1125,13 +1144,17 @@ func parseParams(paramStr []string, cORa string) ([]ColParam, int) {
 			param.Scalar = strarr[1]
 			param.CName = strarr[2]
 			// fmt.Printf("\nparsed para:%+v", param)
-			if param.Scalar == "CNT" || param.Scalar == "SUM" {
+			if param.Scalar == "CNT" || param.Scalar == "SUM" || param.Scalar == "AVG" {
 				if cORa == "c" {
 					param.SqlColStr = paramColMap[strarr[0]].CustCol
 				} else {
 					param.SqlColStr = paramColMap[strarr[0]].AcctCol
 				}
-				param.QueryType = 4
+				if param.Scalar == "AVG" {
+					param.QueryType = 5
+				} else {
+					param.QueryType = 4
+				}
 			} else { // MIN,MAX,STD,VAR, AVG
 				param.SqlColStr = strarr[0]
 				param.QueryType = 9
@@ -1372,11 +1395,10 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 	chRes := make(chan TestRes, len(TstGrp.Tests))
 	chSqlRes := make(chan [][]int64, 1)
 
-	for _, toptststr := range TstGrp.Tests { // one test at a time
+	for toptststr, _ := range TstGrp.Tests { // one test at a time
 		go func(tststr string, ch chan TestRes) {
 			sqlstr := ""
 			tRes := new(TestRes)
-			var avgVal float32
 			var wg1 sync.WaitGroup
 
 			tRes.TName = txTestCache[tststr].TName
@@ -1385,8 +1407,8 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 
 			defer wg0.Done()
 
-			for idx, _ := range TstGrp.TestSups[tststr] { // process each param in the test, col is the columnSup struct
-				switch txTestCache[tststr].Params[idx].QueryType {
+			for idx, lparam := range txTestCache[tststr].Params { // process each param in the test, col is the columnSup struct
+				switch lparam.QueryType {
 				case 9: // aggregate type
 					wg1.Add(1)
 					go func(i1 int, tst string) {
@@ -1394,43 +1416,39 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 						sqlstm := "SELECT " + txTestCache[tst].Params[i1].SqlColStr + " FROM TX WHERE idCUST = ? and idTX > ? and " +
 							txTestCache[tst].Params[i1].CName + ">0"
 						defer wg1.Done()
-						t3 := time.Now()
+						//t3 := time.Now()
 						rows, err := db.Query(sqlstm, cID, txTestCache[tst].Period.getBegineTimeNano(t))
-						fmt.Printf("\nTime in Cust SQL Execution: %v, cid:%d, idTX: %d", time.Since(t3), cID, txTestCache[tst].Period.getBegineTimeNano(t))
+						//fmt.Printf("\nTime in Cust SQL Execution: %v, cid:%d, idTX: %d", time.Since(t3), cID, txTestCache[tst].Period.getBegineTimeNano(t))
 						if err != nil {
 							//fmt.Printf("\nmore errors here SQL, custid and time: %s, %d, %d ", sqlstm, cID, txTestCache[tst].Period.getBegineTimeNano(t))
 							panic("\nerror in aggregate SQL result:" + err.Error() + "\n" + sqlstm + fmt.Sprintf(",params:%+v", txTestCache[tst].Params[1]))
 						}
 
 						if rows.Next() {
-							if txTestCache[tst].Params[i1].Scalar == "AVG" {
-								rows.Scan(&avgVal)
-								TstGrp.TestSups[tst][i1].SqlColValue = int64(avgVal)
-							} else {
-								rows.Scan(&TstGrp.TestSups[tst][i1].SqlColValue)
-							}
+							rows.Scan(&TstGrp.TestParamValue[tst][i1])
+
 						} else {
-							TstGrp.TestSups[tst][i1].SqlColValue = 0
+							TstGrp.TestParamValue[tst][i1] = 0
 						}
 						rows.Close()
 						fmt.Printf("\nTime in Cust Agg: %v, sql: %s", time.Since(t2), sqlstm)
 						//fmt.Printf("\nSQL err: %v, value:%d, %f, sql:%s, cid%d, tim:e%d\n", err, TstGrp.TestSups[tststr][idx].SqlColValue, avgVal, sqlstm, cID, txTestCache[tststr].Period.getBegineTimeNano(t))
 					}(idx, tststr)
-				case 4: // Sql type
+				case 4, 5: // Sql type
 					// do nothing
 
 				case 1: // NoSQL type
 					switch txTestCache[tststr].Params[idx].Scalar {
 					case "t": // transaction field
 						r := reflect.ValueOf(txInput)
-						TstGrp.TestSups[tststr][idx].SqlColValue = reflect.Indirect(r).FieldByName(txTestCache[tststr].Params[idx].CName).Interface()
+						TstGrp.TestParamValue[tststr][idx] = reflect.Indirect(r).FieldByName(txTestCache[tststr].Params[idx].CName).Interface()
 						//fmt.Printf("\nin case t:%s, %+v, %+v", txTestCache[tststr].Params[idx].CName, txInput, TstGrp.TestSups[tststr][idx].SqlColValue)
 					case "c": // customer fields
 						//fmt.Printf("\nin case c:%s, %+v, %+v", txTestCache[tststr].Params[idx].CName, custAttMap[cID], custAttMap[cID][txTestCache[tststr].Params[idx].CName])
-						TstGrp.TestSups[tststr][idx].SqlColValue = custAttMap[cID][txTestCache[tststr].Params[idx].CName]
+						TstGrp.TestParamValue[tststr][idx] = custAttMap[cID][txTestCache[tststr].Params[idx].CName]
 					case "a": // account fields
 						//fmt.Printf("\nin case a:%s, %+v, %+v", txTestCache[tststr].Params[idx].CName, acctAttMap[aID], acctAttMap[aID][txTestCache[tststr].Params[idx].CName])
-						TstGrp.TestSups[tststr][idx].SqlColValue = acctAttMap[aID][txTestCache[tststr].Params[idx].CName]
+						TstGrp.TestParamValue[tststr][idx] = acctAttMap[aID][txTestCache[tststr].Params[idx].CName]
 					}
 				default:
 					// dont' expect exceptions
@@ -1453,10 +1471,17 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 				// fmt.Printf("\nresend from test%s", tsts)
 
 				// fmt.Printf("\nChannel received:%+v", sqlRes)
-				for idx, _ := range TstGrp.TestSups[tsts] { // assign column value
+				for idx, _ := range TstGrp.TestParamValue[tsts] { // assign column value
 					if txTestCache[tsts].Params[idx].QueryType == 4 {
-						TstGrp.TestSups[tsts][idx].SqlColValue = custAttMap[cID][paramColMap[txTestCache[tsts].Params[idx].Param].CustCol].(int64) -
-							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.TestSups[tsts][idx].SqlColIdx]
+						TstGrp.TestParamValue[tsts][idx] = custAttMap[cID][paramColMap[txTestCache[tsts].Params[idx].Param].CustCol].(int64) -
+							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]]
+					} else if txTestCache[tsts].Params[idx].QueryType == 5 {
+						tVal := custAttMap[cID][paramColMap[txTestCache[tsts].Params[idx].Param].CustCol].(int64) -
+							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]]
+						cntParamStr := "CNT(" + txTestCache[tsts].Params[idx].CName + ")"
+						tCnt := custAttMap[cID][paramColMap[cntParamStr].CustCol].(int64) -
+							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[paramColMap[cntParamStr].CustCol]]
+						TstGrp.TestParamValue[tsts][idx] = int64(tVal / tCnt)
 					}
 				}
 
@@ -1471,19 +1496,19 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 			paras := make(map[string]interface{})
 			var strVal string
 
-			for idx, val := range TstGrp.TestSups[tststr] {
-				paras["p"+strconv.Itoa(idx+1)] = val.SqlColValue
+			for idx, val := range TstGrp.TestParamValue[tststr] {
+				paras["p"+strconv.Itoa(idx+1)] = val
 				// fmt.Printf("\ninterface - 1 :%d, %v", txTestCache[tststr].Params[idx].Param, val.SqlColValue)
 
 				//			strVal = strconv.FormatInt(val.SqlColValue.(int64), 10)
 				// fmt.Printf("\nafter int type - 1 %v", val.SqlColValue)
-				switch t := val.SqlColValue.(type) {
+				switch t := val.(type) {
 				case string:
-					strVal = val.SqlColValue.(string)
+					strVal = val.(string)
 				case int32, int64:
-					strVal = strconv.FormatInt(val.SqlColValue.(int64), 10)
+					strVal = strconv.FormatInt(val.(int64), 10)
 				case int:
-					strVal = strconv.Itoa(val.SqlColValue.(int))
+					strVal = strconv.Itoa(val.(int))
 				default:
 					fmt.Printf("\nwhat's going on?%v", t)
 					panic("unknown type here")
@@ -1593,11 +1618,10 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 	chRes := make(chan TestRes, len(TstGrp.Tests))
 	chSqlRes := make(chan [][]int64, 1)
 
-	for _, toptststr := range TstGrp.Tests { // one test at a time
+	for toptststr, _ := range TstGrp.Tests { // one test at a time
 		go func(tststr string, ch chan TestRes) {
 			sqlstr := ""
 			tRes := new(TestRes)
-			var avgVal float32
 			var wg1 sync.WaitGroup
 
 			tRes.TName = txTestCache[tststr].TName
@@ -1606,49 +1630,48 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 
 			defer wg0.Done()
 
-			for idx, _ := range TstGrp.TestSups[tststr] { // process each param in the test, col is the columnSup struct
-				switch txTestCache[tststr].Params[idx].QueryType {
+			for idx, lparam := range txTestCache[tststr].Params { // process each param in the test, col is the columnSup struct
+				switch lparam.QueryType {
 				case 9: // aggregate type
 					wg1.Add(1)
-					func(i1 int, tst string) {
+					go func(i1 int, tst string) {
+						t2 := time.Now()
 						sqlstm := "SELECT " + txTestCache[tst].Params[i1].SqlColStr + " FROM TX WHERE idCUST = ? and idACCT = ? and idTX > ? and " +
 							txTestCache[tst].Params[i1].CName + ">0"
-						defer wg1.Done()
 
+						defer wg1.Done()
 						rows, err := db.Query(sqlstm, cID, aID, txTestCache[tst].Period.getBegineTimeNano(t))
+						//fmt.Printf("\nTime in Acct SQL Execution: %v, cid:%d, idTX: %d", time.Since(t3), cID, txTestCache[tst].Period.getBegineTimeNano(t))
 						if err != nil {
-							//fmt.Printf("\nmore errors here SQL, custid, acctid and time: %s, %d, %d %d ", sqlstm, cID,aID, txTestCache[tst].Period.getBegineTimeNano(t))
+							//fmt.Printf("\nmore errors here SQL, acctid, acctid and time: %s, %d, %d %d ", sqlstm, cID,aID, txTestCache[tst].Period.getBegineTimeNano(t))
 							panic("\nerror in aggregate SQL result:" + err.Error() + "\n" + sqlstm + fmt.Sprintf(",params:%+v", txTestCache[tst].Params[1]))
 						}
 
 						if rows.Next() {
-							if txTestCache[tst].Params[i1].Scalar == "AVG" {
-								rows.Scan(&avgVal)
-								TstGrp.TestSups[tst][i1].SqlColValue = int64(avgVal)
-							} else {
-								rows.Scan(&TstGrp.TestSups[tst][i1].SqlColValue)
-							}
+							rows.Scan(&TstGrp.TestParamValue[tst][i1])
+
 						} else {
-							TstGrp.TestSups[tst][i1].SqlColValue = 0
+							TstGrp.TestParamValue[tst][i1] = 0
 						}
 						rows.Close()
+						fmt.Printf("\nTime in Acct Agg: %v, sql: %s", time.Since(t2), sqlstm)
 						//fmt.Printf("\nSQL err: %v, value:%d, %f, sql:%s, cid%d, tim:e%d\n", err, TstGrp.TestSups[tststr][idx].SqlColValue, avgVal, sqlstm, cID, txTestCache[tststr].Period.getBegineTimeNano(t))
 					}(idx, tststr)
-				case 4: // Sql type
+				case 4, 5: // Sql type
 					// do nothing
 
 				case 1: // NoSQL type
 					switch txTestCache[tststr].Params[idx].Scalar {
 					case "t": // transaction field
 						r := reflect.ValueOf(txInput)
-						TstGrp.TestSups[tststr][idx].SqlColValue = reflect.Indirect(r).FieldByName(txTestCache[tststr].Params[idx].CName).Interface()
+						TstGrp.TestParamValue[tststr][idx] = reflect.Indirect(r).FieldByName(txTestCache[tststr].Params[idx].CName).Interface()
 						//fmt.Printf("\nin case t:%s, %+v, %+v", txTestCache[tststr].Params[idx].CName, txInput, TstGrp.TestSups[tststr][idx].SqlColValue)
 					case "c": // customer fields
-						//fmt.Printf("\nin case c:%s, %+v, %+v", txTestCache[tststr].Params[idx].CName, acctAttMap[aID], acctAttMap[aID][txTestCache[tststr].Params[idx].CName])
-						TstGrp.TestSups[tststr][idx].SqlColValue = custAttMap[cID][txTestCache[tststr].Params[idx].CName]
+						//fmt.Printf("\nin case c:%s, %+v, %+v", txTestCache[tststr].Params[idx].CName, custAttMap[cID], custAttMap[cID][txTestCache[tststr].Params[idx].CName])
+						TstGrp.TestParamValue[tststr][idx] = custAttMap[cID][txTestCache[tststr].Params[idx].CName]
 					case "a": // account fields
 						//fmt.Printf("\nin case a:%s, %+v, %+v", txTestCache[tststr].Params[idx].CName, acctAttMap[aID], acctAttMap[aID][txTestCache[tststr].Params[idx].CName])
-						TstGrp.TestSups[tststr][idx].SqlColValue = acctAttMap[aID][txTestCache[tststr].Params[idx].CName]
+						TstGrp.TestParamValue[tststr][idx] = acctAttMap[aID][txTestCache[tststr].Params[idx].CName]
 					}
 				default:
 					// dont' expect exceptions
@@ -1656,31 +1679,37 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 				}
 			}
 			wg1.Add(1)
-			func(sql string, tsts string) {
+			go func(sql string, tsts string) {
+				//	t1 := time.Now()
 				defer wg1.Done()
 
-				//fmt.Printf("\nenter test%s", tsts)
+				// fmt.Printf("\nenter test%s", tsts)
 
 				var sqlRes [][]int64
 
 				sqlRes = <-chSqlRes
-				//fmt.Printf("\nread from test%s", tsts)
+				// fmt.Printf("\nread from test%s", tsts)
 				chSqlRes <- sqlRes // put right back to the channel for other test goroutines
 
-				//fmt.Printf("\nresend from test%s", tsts)
+				// fmt.Printf("\nresend from test%s", tsts)
 
 				// fmt.Printf("\nChannel received:%+v", sqlRes)
-				for idx, _ := range TstGrp.TestSups[tsts] { // assign column value
+				for idx, _ := range TstGrp.TestParamValue[tsts] { // assign column value
 					if txTestCache[tsts].Params[idx].QueryType == 4 {
-						//fmt.Printf("\nsql col index:%d", TstGrp.TestSups[tsts][idx].SqlColIdx)
-						//fmt.Printf("\nsql result index %d", TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx)
-						//fmt.Printf("\nacctAtt params:%+v", txTestCache[tsts].Params[idx])
-						TstGrp.TestSups[tsts][idx].SqlColValue = acctAttMap[aID][paramColMap[txTestCache[tsts].Params[idx].Param].AcctCol].(int64) -
-							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.TestSups[tsts][idx].SqlColIdx]
+						TstGrp.TestParamValue[tsts][idx] = acctAttMap[aID][paramColMap[txTestCache[tsts].Params[idx].Param].AcctCol].(int64) -
+							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]]
+					} else if txTestCache[tsts].Params[idx].QueryType == 5 {
+						tVal := acctAttMap[aID][paramColMap[txTestCache[tsts].Params[idx].Param].AcctCol].(int64) -
+							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]]
+						cntParamStr := "CNT(" + txTestCache[tsts].Params[idx].CName + ")"
+						tCnt := acctAttMap[aID][paramColMap[cntParamStr].AcctCol].(int64) -
+							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[paramColMap[cntParamStr].AcctCol]]
+						TstGrp.TestParamValue[tsts][idx] = int64(tVal / tCnt)
 					}
 				}
 
 			}(sqlstr, tststr)
+			// fmt.Printf("\ntstgrp 2:%+v \nAcctCash:%+v\nAcct att map:%+v", TstGrp, acctCache[cID], acctAttMap[cID])
 
 			wg1.Wait()
 
@@ -1690,19 +1719,19 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 			paras := make(map[string]interface{})
 			var strVal string
 
-			for idx, val := range TstGrp.TestSups[tststr] {
-				paras["p"+strconv.Itoa(idx+1)] = val.SqlColValue
+			for idx, val := range TstGrp.TestParamValue[tststr] {
+				paras["p"+strconv.Itoa(idx+1)] = val
 				// fmt.Printf("\ninterface - 1 :%d, %v", txTestCache[tststr].Params[idx].Param, val.SqlColValue)
 
 				//			strVal = strconv.FormatInt(val.SqlColValue.(int64), 10)
 				// fmt.Printf("\nafter int type - 1 %v", val.SqlColValue)
-				switch t := val.SqlColValue.(type) {
+				switch t := val.(type) {
 				case string:
-					strVal = val.SqlColValue.(string)
+					strVal = val.(string)
 				case int32, int64:
-					strVal = strconv.FormatInt(val.SqlColValue.(int64), 10)
+					strVal = strconv.FormatInt(val.(int64), 10)
 				case int:
-					strVal = strconv.Itoa(val.SqlColValue.(int))
+					strVal = strconv.Itoa(val.(int))
 				default:
 					fmt.Printf("\nwhat's going on?%v", t)
 					panic("unknown type here")
@@ -1758,7 +1787,7 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 
 		sqlstm = sqlstm[:len(sqlstm)-11] + ";" // remove the UNION at the end
 
-		fmt.Printf("\nsql group sql: %s", sqlstm)
+		fmt.Printf("\nsql group Acct sql: %s", sqlstm)
 		rows, err := db.Query(sqlstm)
 
 		if err != nil {
@@ -1785,8 +1814,10 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 
 		rows.Close()
 
-		fmt.Printf("\nResult sent in acct SQL channel:%+v", sqlRes)
+		fmt.Printf("\nAcct Sql Result sent in channel:%+v", sqlRes)
 		chSqlRes <- sqlRes
+		// fmt.Printf("\nTime SQL:%s", sqlstm)
+
 		fmt.Printf("\ntime elapse in Acct SQL query:%v", time.Since(t1))
 
 	}
