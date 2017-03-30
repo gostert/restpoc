@@ -53,7 +53,7 @@ type Page struct {
 
 func main() {
 	var err error
-	db, err = sql.Open("mysql", "leedev:Sanmateo347@tcp(52.55.53.69:3306)/gopoc")
+	db, err = sql.Open("mysql", "leedev:Sanmateo347@tcp(34.206.152.113:3306)/gopoc")
 	if err != nil {
 		log.Panic(err)
 	}
@@ -1427,6 +1427,10 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 						if rows.Next() {
 							rows.Scan(&TstGrp.TestParamValue[tst][i1])
 
+							if TstGrp.TestParamValue[tst][i1] == nil {
+								TstGrp.TestParamValue[tst][i1] = 0
+							}
+
 						} else {
 							TstGrp.TestParamValue[tst][i1] = 0
 						}
@@ -1481,7 +1485,11 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 						cntParamStr := "CNT(" + txTestCache[tsts].Params[idx].CName + ")"
 						tCnt := custAttMap[cID][paramColMap[cntParamStr].CustCol].(int64) -
 							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[paramColMap[cntParamStr].CustCol]]
-						TstGrp.TestParamValue[tsts][idx] = int64(tVal / tCnt)
+						if tCnt == 0 {
+							TstGrp.TestParamValue[tsts][idx] = 0
+						} else {
+							TstGrp.TestParamValue[tsts][idx] = int64(tVal / tCnt)
+						}
 					}
 				}
 
@@ -1495,8 +1503,10 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 			// building test parameters
 			paras := make(map[string]interface{})
 			var strVal string
+			fmt.Printf("\nval in total TstGrp%+v\nParamValue:%+v", TstGrp, TstGrp.TestParamValue[tststr])
 
 			for idx, val := range TstGrp.TestParamValue[tststr] {
+				fmt.Printf("\nval in TstGrp%v", val)
 				paras["p"+strconv.Itoa(idx+1)] = val
 				// fmt.Printf("\ninterface - 1 :%d, %v", txTestCache[tststr].Params[idx].Param, val.SqlColValue)
 
@@ -1638,7 +1648,6 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 						t2 := time.Now()
 						sqlstm := "SELECT " + txTestCache[tst].Params[i1].SqlColStr + " FROM TX WHERE idCUST = ? and idACCT = ? and idTX > ? and " +
 							txTestCache[tst].Params[i1].CName + ">0"
-
 						defer wg1.Done()
 						rows, err := db.Query(sqlstm, cID, aID, txTestCache[tst].Period.getBegineTimeNano(t))
 						//fmt.Printf("\nTime in Acct SQL Execution: %v, cid:%d, idTX: %d", time.Since(t3), cID, txTestCache[tst].Period.getBegineTimeNano(t))
@@ -1649,10 +1658,14 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 
 						if rows.Next() {
 							rows.Scan(&TstGrp.TestParamValue[tst][i1])
+							if TstGrp.TestParamValue[tst][i1] == nil {
+								TstGrp.TestParamValue[tst][i1] = 0
+							}
 
 						} else {
 							TstGrp.TestParamValue[tst][i1] = 0
 						}
+
 						rows.Close()
 						fmt.Printf("\nTime in Acct Agg: %v, sql: %s", time.Since(t2), sqlstm)
 						//fmt.Printf("\nSQL err: %v, value:%d, %f, sql:%s, cid%d, tim:e%d\n", err, TstGrp.TestSups[tststr][idx].SqlColValue, avgVal, sqlstm, cID, txTestCache[tststr].Period.getBegineTimeNano(t))
@@ -1704,7 +1717,11 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 						cntParamStr := "CNT(" + txTestCache[tsts].Params[idx].CName + ")"
 						tCnt := acctAttMap[aID][paramColMap[cntParamStr].AcctCol].(int64) -
 							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[paramColMap[cntParamStr].AcctCol]]
-						TstGrp.TestParamValue[tsts][idx] = int64(tVal / tCnt)
+						if tCnt == 0 {
+							TstGrp.TestParamValue[tsts][idx] = 0
+						} else {
+							TstGrp.TestParamValue[tsts][idx] = int64(tVal / tCnt)
+						}
 					}
 				}
 
