@@ -30,6 +30,7 @@ var db *sql.DB
 var txChannel = make(chan TxInfo, 10000)
 var custCache = map[int64]Cust{}
 var acctCache = map[int64]Acct{}
+var credential map[string]string
 var custAttMap = make(map[int64]map[string]interface{}) // customer column cache map
 var acctAttMap = make(map[int64]map[string]interface{}) // Account column cache map
 var mu = &sync.Mutex{}
@@ -53,7 +54,7 @@ type Page struct {
 
 func main() {
 	var err error
-	db, err = sql.Open("mysql", "leedev:Sanmateo347@tcp(34.206.152.113:3306)/gopoc")
+	db, err = sql.Open("mysql", "leedev:Sanmateo347@tcp(34.206.152.113:3306)/restapi")
 	if err != nil {
 		log.Panic(err)
 	}
@@ -86,27 +87,35 @@ func main() {
 		go updateTX()
 	}
 
-	_ = "breakpoint"
-	p1 := &Page{Title: "GoPage", Body: []byte("This is a sample Page.")}
-	p1.save()
-	p2, _ := loadPage("GoPage")
-	fmt.Println(string(p2.Body))
+	/*
+		_ = "breakpoint"
+		p1 := &Page{Title: "GoPage", Body: []byte("This is a sample Page.")}
+		p1.save()
+		p2, _ := loadPage("GoPage")
+		fmt.Println(string(p2.Body))
+	*/
 	//  timeFunctions()
 	//	randomNumbers()
 	// govaluateFunctions()
 
-	http.HandleFunc("/view/", HFHandleFunc(viewHandler))
-	http.HandleFunc("/edit/", HFHandleFunc(editHandler))
-	http.HandleFunc("/save/", HFHandleFunc(saveHandler))
-	http.HandleFunc("/getrules/", HFHandleFunc(getrulesHandler))
-	http.HandleFunc("/check/", HFHandleFunc(checkHandler))
-	http.HandleFunc("/addCust/", HFHandleFunc(addCustHandler))
-	http.HandleFunc("/getCust/", HFHandleFunc(getCustHandler))
-	http.HandleFunc("/getAllCust/", HFHandleFunc(getAllCustHandler))
-	http.HandleFunc("/getAcct/", HFHandleFunc(getAcctHandler))
-	http.HandleFunc("/processTx/", HFHandleFunc(processTxHandler))
+	initCredential()
 
-	http.ListenAndServe("0.0.0.0:8080", nil)
+	http.HandleFunc("/view/", LHFHandleFunc(viewHandler))
+	http.HandleFunc("/edit/", LHFHandleFunc(editHandler))
+	http.HandleFunc("/save/", LHFHandleFunc(saveHandler))
+	http.HandleFunc("/json/", LHFHandleFunc(jsonHandler))
+	http.HandleFunc("/getrules/", LHFHandleFunc(getrulesHandler))
+	http.HandleFunc("/check/", LHFHandleFunc(checkHandler))
+	http.HandleFunc("/addCust/", LHFHandleFunc(addCustHandler))
+	http.HandleFunc("/getCust/", LHFHandleFunc(getCustHandler))
+	http.HandleFunc("/getAllCust/", LHFHandleFunc(getAllCustHandler))
+	http.HandleFunc("/getAcct/", LHFHandleFunc(getAcctHandler))
+	http.HandleFunc("/processTxnoj/", LHFHandleFunc(processTxnojHandler))
+	http.HandleFunc("/processTx/", LHFHandleFunc(processTxHandler))
+
+	err = http.ListenAndServeTLS("0.0.0.0:8080", "../rsa/leecert.pem", "../rsa/leekey.pem", nil)
+	// err = http.ListenAndServe("0.0.0.0:8080", nil)
+	log.Fatal(err)
 }
 
 func timeFunctions() float32 { // time related functions
@@ -194,9 +203,25 @@ func govaluateFunctions() { // dynamic express evaluations
 	fmt.Println("with 2 parameters:", result, err)
 }
 
-func HFHandleFunc(fn http.HandlerFunc) http.HandlerFunc {
+func LHFHandleFunc(fn http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tstart := time.Now()
+
+		username, password, _ := r.BasicAuth()
+		// fmt.Printf("\nBasic Auth user:%s, password:%s\n", username, password)
+
+		if pass, ok := credential[username]; ok {
+			if password != pass {
+				http.Error(w, "Invalid Password", http.StatusUnauthorized)
+				fmt.Fprintf(w, "\nTime Elapse:%v", time.Since(tstart))
+				return
+			}
+		} else {
+			http.Error(w, "Invalid Username", http.StatusUnauthorized)
+			fmt.Fprintf(w, "\nTime Elapse:%v", time.Since(tstart))
+			return
+		}
+
 		fn(w, r)
 		fmt.Fprintf(w, "\nTime Elapse:%v", time.Since(tstart))
 	}
@@ -239,6 +264,30 @@ func saveHandler(w http.ResponseWriter, r *http.Request) {
 	p := &Page{Title: title, Body: []byte(body)}
 	p.save()
 	http.Redirect(w, r, "/view/"+title, http.StatusFound)
+}
+
+func jsonHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/json/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	if r.Method != "POST" { // expecting POST method
+		http.Error(w, "Invalid request method.", 405)
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	var in TxInput
+
+	err := decoder.Decode(&in)
+	if err != nil {
+		panic(err)
+	}
+
+	defer r.Body.Close()
+
+	fmt.Fprintf(w, "rules: %+v", in)
 }
 
 func getrulesHandler(w http.ResponseWriter, r *http.Request) {
@@ -413,6 +462,7 @@ func getCust(cid int64) (*Cust, error) {
 	if ok {
 		return &cust, nil
 	} else {
+		fmt.Printf("\nQuery new customer: %d", cid)
 		err := db.QueryRow("SELECT nName, totCDebit, totCCredit, bal, cntCDebit, cntCCredit, cntCTot,totFee FROM CUST where idCUST = ?", cid).Scan(
 			&cust.NName, &cust.TotCDebit, &cust.TotCCredit, &cust.Bal, &cust.CntCDebit, &cust.CntCCredit, &cust.CntCTot, &cust.TotFee)
 
@@ -534,6 +584,15 @@ func getAcctHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "%d, %+v", acct.AcctID, *acct)
 	}
 
+}
+
+// Init user and password
+func initCredential() error {
+	credential = map[string]string{
+		"leedev": "Go123",
+		"guest":  "xxx"}
+
+	return nil
 }
 
 // return a single customer record in the form of customer structure
@@ -867,7 +926,7 @@ type TestRes struct {
 
 type TxResult struct {
 	HostTxID       string    `json:"hostTxID,omitempty"`
-	HfTxID         int64     `json:"hfTxID,omitempty"`
+	LHfTxID        int64     `json:"lhfTxID,omitempty"`
 	CustID         int64     `json:"custID,omitempty"`
 	AcctID         int64     `json:"acctID,omitempty"`
 	TxDateTime     string    `json:"txDateTime,omitempty"`
@@ -875,6 +934,7 @@ type TxResult struct {
 	Note           string    `json:"note,omitempty"`
 	DefinedFilters string    `json:"-"`
 	ActiveFilters  string    `json:"filters,omitempty"`
+	TestCount      int       `json:"testCount,omitempty"`
 	SumScore       string    `json:"sumScore,omitempty"`
 	Safes          int       `json:"safes,omitempty"`
 	Fails          int       `json:"fails,omitempty"`
@@ -1179,10 +1239,10 @@ func parseParams(paramStr []string, cORa string) ([]ColParam, int) {
 }
 
 // add customer handler
-func processTxHandler(w http.ResponseWriter, r *http.Request) {
+func processTxnojHandler(w http.ResponseWriter, r *http.Request) {
 
-	// experected url: /processTx/ (with form parameters:
-	if r.URL.Path != "/processTx/" {
+	// experected url: /processTxnoj/ (with form parameters:
+	if r.URL.Path != "/processTxnoj/" {
 		http.NotFound(w, r)
 		return
 	}
@@ -1215,7 +1275,36 @@ func processTxHandler(w http.ResponseWriter, r *http.Request) {
 
 	txResultStr := processTx(&txIn)
 
-	fmt.Fprintf(w, "TX Verification Results:\n%s", txResultStr)
+	fmt.Fprintf(w, "%s", txResultStr)
+}
+
+// Process transaction verifications, expecting json post input
+func processTxHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/processTx/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	if r.Method != "POST" { // expecting POST method
+		http.Error(w, "Invalid request method.", 405)
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	var txIn TxInput
+
+	err := decoder.Decode(&txIn)
+	if err != nil {
+		panic(err)
+	}
+
+	defer r.Body.Close()
+
+	// fmt.Printf("\nTX input:\n%+v\n", txIn)
+
+	txResultStr := processTx(&txIn)
+
+	fmt.Fprintf(w, "%s", txResultStr)
 }
 
 // Entry function for verify a single transaction
@@ -1231,7 +1320,7 @@ func processTx(txInput *TxInput) string {
 
 	rTxResult := TxResult{
 		HostTxID:   txInput.HostTxID,
-		HfTxID:     txInput.TxID,
+		LHfTxID:    txInput.TxID,
 		CustID:     txInput.CustID,
 		AcctID:     txInput.AcctID,
 		TxDateTime: txInput.TxDateTime,
@@ -1299,6 +1388,34 @@ func processTx(txInput *TxInput) string {
 		rTxResult.TestResults = append(rTxResult.TestResults, tResCustGrp...)
 		rTxResult.TestResults = append(rTxResult.TestResults, tResAcctGrp...)
 
+		rTxResult.TestCount = len(rTxResult.TestResults)
+
+		for _, tTst := range rTxResult.TestResults {
+			switch tTst.Score {
+			case "s", "e": // safe
+				rTxResult.Safes++
+			case "d": // danger
+				rTxResult.Dangers++
+			case "m": // may be
+				rTxResult.Maybes++
+			case "f": // fail
+				rTxResult.Fails++
+			default:
+				// dont' expect exceptions
+				panic("\nUnexpected query type")
+			}
+		}
+
+		if rTxResult.Fails > 0 {
+			rTxResult.SumScore = "f"
+		} else if rTxResult.Dangers > 0 {
+			rTxResult.SumScore = "d"
+		} else if rTxResult.Maybes > 0 {
+			rTxResult.SumScore = "m"
+		} else {
+			rTxResult.SumScore = "s"
+		}
+
 	} else if txInput.VerifyFlag == 1 { // for verification correction, transaction update only
 		rTxResult.SumScore = "n"
 		rTxResult.Note = "Verification skipped, correction issued"
@@ -1309,8 +1426,8 @@ func processTx(txInput *TxInput) string {
 		rTxResult.SumScore = "n"
 	}
 
-	retStr, err := json.Marshal(rTxResult)
-	// retStr, err := json.MarshalIndent(rTxResult, "", "  ")
+	// retStr, err := json.Marshal(rTxResult)
+	retStr, err := json.MarshalIndent(rTxResult, "", "  ")
 
 	if err != nil {
 		fmt.Printf("Error: %s", err)
@@ -1503,10 +1620,10 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 			// building test parameters
 			paras := make(map[string]interface{})
 			var strVal string
-			fmt.Printf("\nval in total TstGrp%+v\nParamValue:%+v", TstGrp, TstGrp.TestParamValue[tststr])
+			// fmt.Printf("\nval in total TstGrp%+v\nParamValue:%+v", TstGrp, TstGrp.TestParamValue[tststr])
 
 			for idx, val := range TstGrp.TestParamValue[tststr] {
-				fmt.Printf("\nval in TstGrp%v", val)
+				// fmt.Printf("\nval in TstGrp%v", val)
 				paras["p"+strconv.Itoa(idx+1)] = val
 				// fmt.Printf("\ninterface - 1 :%d, %v", txTestCache[tststr].Params[idx].Param, val.SqlColValue)
 
@@ -1574,7 +1691,7 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 
 		sqlstm = sqlstm[:len(sqlstm)-11] + ";" // remove the UNION at the end
 
-		fmt.Printf("\nsql group CUST sql: %s", sqlstm)
+		// fmt.Printf("\nsql group CUST sql: %s", sqlstm)
 		rows, err := db.Query(sqlstm)
 
 		if err != nil {
@@ -1601,7 +1718,7 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 
 		rows.Close()
 
-		fmt.Printf("\nCust Sql Result sent in channel:%+v", sqlRes)
+		// fmt.Printf("\nCust Sql Result sent in channel:%+v", sqlRes)
 		chSqlRes <- sqlRes
 		// fmt.Printf("\nTime SQL:%s", sqlstm)
 
@@ -1804,7 +1921,7 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 
 		sqlstm = sqlstm[:len(sqlstm)-11] + ";" // remove the UNION at the end
 
-		fmt.Printf("\nsql group Acct sql: %s", sqlstm)
+		// fmt.Printf("\nsql group Acct sql: %s", sqlstm)
 		rows, err := db.Query(sqlstm)
 
 		if err != nil {
@@ -1831,7 +1948,7 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 
 		rows.Close()
 
-		fmt.Printf("\nAcct Sql Result sent in channel:%+v", sqlRes)
+		// fmt.Printf("\nAcct Sql Result sent in channel:%+v", sqlRes)
 		chSqlRes <- sqlRes
 		// fmt.Printf("\nTime SQL:%s", sqlstm)
 
@@ -1945,7 +2062,7 @@ func updateTXGrp(txGrp []TxInfo) {
 
 	//trim the last ,
 	sqlTX = sqlTX[0:len(sqlTX)-2] + " on duplicate key update special='D';"
-	fmt.Printf("\nTxGrp: %+v\nTX Insert:\n%s", txGrp, sqlTX)
+	// fmt.Printf("\nTxGrp: %+v\nTX Insert:\n%s", txGrp, sqlTX)
 	_, err := db.Exec(sqlTX)
 	if err != nil {
 		panic("\nTX Insert Statement error\n" + err.Error()) // proper error handling instead of panic in your app
