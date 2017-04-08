@@ -21,8 +21,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	_ "github.com/Go-SQL-Driver/MySQL" // _ means for side effect of initialization or registration
 	"github.com/Knetic/govaluate"
+	_ "github.com/go-sql-driver/mysql" // _ means for side effect of initialization or registration
 	"github.com/jinzhu/now"
 )
 
@@ -122,7 +122,7 @@ func timeFunctions() float32 { // time related functions
 	start := time.Now()
 	fmt.Println("time.Now():", time.Now())
 	//init the loc
-	zone, _ := time.LoadLocation("America/LOS_ANGELES")
+	zone, _ := time.LoadLocation("America/Los_Angeles")
 	Eastern := time.FixedZone("EDT", -5*3600)
 	Pacific := time.FixedZone("PDT", -8*3600)
 
@@ -1314,7 +1314,7 @@ func processTxHandler(w http.ResponseWriter, r *http.Request) {
 func processTx(txInput *TxInput) string {
 	// generate txID and return header
 
-	zone, _ := time.LoadLocation("America/NEW_YORK")
+	zone, _ := time.LoadLocation("America/New_York")
 	t := time.Now().In(zone)
 	txInput.TxID = t.UnixNano()
 	txInput.TxDateTime = t.Format("2006-01-02 15:04:05 MST")
