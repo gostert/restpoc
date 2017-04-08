@@ -698,11 +698,12 @@ func addCustHandler(w http.ResponseWriter, r *http.Request) {
 // add 1-5 accounts for each customer with random data
 func addCust(cnt int) sql.Result {
 
-	FiCIDpadding := 100100000000000  // 4 digit FI id, 11 digit customer id
-	FiAIDpadding := 1001000000000000 // 4 digit FI id, 12 digit account id
+	var FiCIDpadding, FiAIDpadding, CidMax, AidMax int64
+	FiCIDpadding = 100100000000000  // 4 digit FI id, 11 digit customer id
+	FiAIDpadding = 1001000000000000 // 4 digit FI id, 12 digit account id
 	FiID := 1001
-	CidMax := 99999999999
-	AidMax := 999999999999
+	CidMax = 99999999999
+	AidMax = 999999999999
 	fNameArr := []string{"Mike", "Dale", "Jen", "Bob", "Judi", "Susan", "Lee", "Rachel", "Jenny"}
 	state := []string{"PA", "DE", "CA", "NY", "TX", "NJ", "FL"}
 	r := rand.New(rand.NewSource(time.Now().UnixNano())) // random seed
@@ -717,7 +718,7 @@ func addCust(cnt int) sql.Result {
 
 	for i := 0; i < cnt; i++ {
 		fName = fNameArr[r.Intn(len(fNameArr))] // random first name
-		cIDs = strconv.Itoa(FiCIDpadding + r.Intn(CidMax) + 1)
+		cIDs = strconv.FormatInt((FiCIDpadding + r.Int63n(CidMax) + 1), 10)
 		balC = r.Intn(100000)
 		sqlCust += "(" + cIDs + ", " + strconv.Itoa(FiID) +
 			", '" + fName + strconv.Itoa(r.Intn(9998)+1) + "','" + fName + "', '" + state[r.Intn(len(state))] +
@@ -733,7 +734,7 @@ func addCust(cnt int) sql.Result {
 				bal = r.Intn(balC / nAcct)
 				baltot += bal
 			}
-			sqlAcct += "(" + cIDs + ", " + strconv.Itoa(FiAIDpadding+r.Intn(AidMax)+1) +
+			sqlAcct += "(" + cIDs + ", " + strconv.FormatInt((FiAIDpadding+r.Int63n(AidMax)+1), 10) +
 				", 'USD', 2, " + strconv.Itoa(bal) + "), "
 		}
 	}
