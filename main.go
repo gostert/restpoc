@@ -113,7 +113,9 @@ func main() {
 	http.HandleFunc("/processTxnoj/", LHFHandleFunc(processTxnojHandler))
 	http.HandleFunc("/processTx/", LHFHandleFunc(processTxHandler))
 
-	err = http.ListenAndServeTLS("0.0.0.0:8080", "../rsa/leecert.pem", "../rsa/leekey.pem", nil)
+	sPath := os.Getenv("GOPATH")
+
+	err = http.ListenAndServeTLS("0.0.0.0:8080", sPath+"/src/github.com/gostert/rsa/leecert.pem", sPath+"/src/github.com/gostert/rsa/leekey.pem", nil)
 	// err = http.ListenAndServe("0.0.0.0:8080", nil)
 	log.Fatal(err)
 }
