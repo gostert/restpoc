@@ -865,6 +865,7 @@ type ColParam struct {
 	Param     string // original param string
 	Scalar    string // scalar function, empty if the no functions
 	CName     string // column name
+	TCName    string // transaction structure column(attribute) name
 	QueryType int    // 1: no SQL, 4: sql test, avg test: 5, 9: aggregate test
 	SqlColStr string // actual SQL column string
 }
@@ -1202,10 +1203,11 @@ func parseParams(paramStr []string, cORa string) ([]ColParam, int) {
 		re = regexp.MustCompile("(\\w{3})\\((.*?)\\)") // expecting scalar functions all have 3 letters
 		strarr = re.FindStringSubmatch(strings.TrimSpace(str))
 
-		if len(strarr) == 3 {
+		if len(strarr) == 3 { // 3 letter scalar functino
 			param.Param = strarr[0]
 			param.Scalar = strarr[1]
 			param.CName = strarr[2]
+			param.TCName = strings.Title(strarr[2])
 			// fmt.Printf("\nparsed para:%+v", param)
 			if param.Scalar == "CNT" || param.Scalar == "SUM" || param.Scalar == "AVG" {
 				if cORa == "c" {
@@ -1222,12 +1224,13 @@ func parseParams(paramStr []string, cORa string) ([]ColParam, int) {
 				param.SqlColStr = strarr[0]
 				param.QueryType = 9
 			}
-		} else {
+		} else { // no SQL query for customer (c), account(a), or transaction (t)
 			s := strings.Split(strings.TrimSpace(str), ".")
 			// fmt.Printf("\nparse string: %s,%v", s)
 			param.Param = strings.TrimSpace(str)
 			param.Scalar = s[0]
 			param.CName = s[1]
+			param.TCName = s[1] // upper case the first letter
 			param.QueryType = 1
 			param.SqlColStr = ""
 		}
@@ -1507,6 +1510,8 @@ func processTx(txInput *TxInput) string {
 	return rTxResult.ReturnStr
 }
 
+var scoreRank = map[string]int{"s": 1, "m": 2, "d": 3, "f": 4}
+
 // processCustTests, returns the group results
 func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInput *TxInput) []TestRes {
 	var grpResult = make([]TestRes, 0)
@@ -1554,6 +1559,23 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 						} else {
 							TstGrp.TestParamValue[tst][i1] = 0
 						}
+						switch txTestCache[tst].Params[i1].Scalar {
+						case "MIN":
+							var val int
+							r := reflect.ValueOf(txInput)
+							val = reflect.Indirect(r).FieldByName(txTestCache[tststr].Params[i1].TCName).Interface().(int)
+							if TstGrp.TestParamValue[tst][i1].(int64) > int64(val) {
+								TstGrp.TestParamValue[tst][i1] = val
+							}
+						case "MAX":
+							var val int
+							r := reflect.ValueOf(txInput)
+							fmt.Printf("\nZero value?:%+v", txTestCache[tststr].Params[i1].TCName)
+							val = reflect.Indirect(r).FieldByName(txTestCache[tststr].Params[i1].TCName).Interface().(int)
+							if TstGrp.TestParamValue[tst][i1].(int64) < int64(val) {
+								TstGrp.TestParamValue[tst][i1] = val
+							}
+						}
 						rows.Close()
 						fmt.Printf("\nTime in Cust Agg: %v, sql: %s", time.Since(t2), sqlstm)
 						//fmt.Printf("\nSQL err: %v, value:%d, %f, sql:%s, cid%d, tim:e%d\n", err, TstGrp.TestSups[tststr][idx].SqlColValue, avgVal, sqlstm, cID, txTestCache[tststr].Period.getBegineTimeNano(t))
@@ -1565,8 +1587,8 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 					switch txTestCache[tststr].Params[idx].Scalar {
 					case "t": // transaction field
 						r := reflect.ValueOf(txInput)
-						TstGrp.TestParamValue[tststr][idx] = reflect.Indirect(r).FieldByName(txTestCache[tststr].Params[idx].CName).Interface()
-						//fmt.Printf("\nin case t:%s, %+v, %+v", txTestCache[tststr].Params[idx].CName, txInput, TstGrp.TestSups[tststr][idx].SqlColValue)
+						TstGrp.TestParamValue[tststr][idx] = reflect.Indirect(r).FieldByName(txTestCache[tststr].Params[idx].TCName).Interface()
+						fmt.Printf("\nin case t:TCName:%s, \ninput:%+v, \nValue:%+v", txTestCache[tststr].Params[idx].TCName, txInput, TstGrp.TestParamValue[tststr][idx])
 					case "c": // customer fields
 						//fmt.Printf("\nin case c:%s, %+v, %+v", txTestCache[tststr].Params[idx].CName, custAttMap[cID], custAttMap[cID][txTestCache[tststr].Params[idx].CName])
 						TstGrp.TestParamValue[tststr][idx] = custAttMap[cID][txTestCache[tststr].Params[idx].CName]
@@ -1597,14 +1619,28 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 				// fmt.Printf("\nChannel received:%+v", sqlRes)
 				for idx, _ := range TstGrp.TestParamValue[tsts] { // assign column value
 					if txTestCache[tsts].Params[idx].QueryType == 4 {
-						TstGrp.TestParamValue[tsts][idx] = custAttMap[cID][paramColMap[txTestCache[tsts].Params[idx].Param].CustCol].(int64) -
-							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]]
-					} else if txTestCache[tsts].Params[idx].QueryType == 5 {
+						switch txTestCache[tsts].Params[idx].Scalar {
+						case "SUM":
+							r := reflect.ValueOf(txInput)
+							TstGrp.TestParamValue[tsts][idx] = custAttMap[cID][paramColMap[txTestCache[tsts].Params[idx].Param].CustCol].(int64) -
+								sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]] +
+								int64(reflect.Indirect(r).FieldByName(txTestCache[tsts].Params[idx].TCName).Interface().(int))
+
+						case "CNT":
+							TstGrp.TestParamValue[tsts][idx] = custAttMap[cID][paramColMap[txTestCache[tsts].Params[idx].Param].CustCol].(int64) -
+								sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]] + 1
+
+						}
+					} else if txTestCache[tsts].Params[idx].QueryType == 5 { // avg function
+						r := reflect.ValueOf(txInput)
 						tVal := custAttMap[cID][paramColMap[txTestCache[tsts].Params[idx].Param].CustCol].(int64) -
-							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]]
+							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]] +
+							int64(reflect.Indirect(r).FieldByName(txTestCache[tsts].Params[idx].TCName).Interface().(int))
+
 						cntParamStr := "CNT(" + txTestCache[tsts].Params[idx].CName + ")"
 						tCnt := custAttMap[cID][paramColMap[cntParamStr].CustCol].(int64) -
-							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[paramColMap[cntParamStr].CustCol]]
+							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[paramColMap[cntParamStr].CustCol]] + 1
+
 						if tCnt == 0 {
 							TstGrp.TestParamValue[tsts][idx] = 0
 						} else {
@@ -1654,6 +1690,8 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 			//fmt.Printf("\nparameters: %+v", paras)
 
 			// evaluate test results
+			tRes.Score = "s"
+
 			for scoreletter, mapstr := range txTestCache[tststr].ScoreMap {
 				expression, err := govaluate.NewEvaluableExpression(mapstr)
 				eval, err := expression.Evaluate(paras)
@@ -1662,7 +1700,9 @@ func processCustTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 				}
 
 				if eval.(bool) {
-					tRes.Score = scoreletter
+					if scoreRank[scoreletter] > scoreRank[tRes.Score] {
+						tRes.Score = scoreletter
+					}
 				}
 			}
 
@@ -1786,6 +1826,23 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 							TstGrp.TestParamValue[tst][i1] = 0
 						}
 
+						switch txTestCache[tst].Params[i1].Scalar {
+						case "MIN":
+							var val int
+							r := reflect.ValueOf(txInput)
+							val = reflect.Indirect(r).FieldByName(txTestCache[tststr].Params[i1].TCName).Interface().(int)
+							if TstGrp.TestParamValue[tst][i1].(int64) > int64(val) {
+								TstGrp.TestParamValue[tst][i1] = val
+							}
+						case "MAX":
+							var val int
+							r := reflect.ValueOf(txInput)
+							val = reflect.Indirect(r).FieldByName(txTestCache[tststr].Params[i1].TCName).Interface().(int)
+							if TstGrp.TestParamValue[tst][i1].(int64) < int64(val) {
+								TstGrp.TestParamValue[tst][i1] = val
+							}
+						}
+
 						rows.Close()
 						fmt.Printf("\nTime in Acct Agg: %v, sql: %s", time.Since(t2), sqlstm)
 						//fmt.Printf("\nSQL err: %v, value:%d, %f, sql:%s, cid%d, tim:e%d\n", err, TstGrp.TestSups[tststr][idx].SqlColValue, avgVal, sqlstm, cID, txTestCache[tststr].Period.getBegineTimeNano(t))
@@ -1797,8 +1854,8 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 					switch txTestCache[tststr].Params[idx].Scalar {
 					case "t": // transaction field
 						r := reflect.ValueOf(txInput)
-						TstGrp.TestParamValue[tststr][idx] = reflect.Indirect(r).FieldByName(txTestCache[tststr].Params[idx].CName).Interface()
-						//fmt.Printf("\nin case t:%s, %+v, %+v", txTestCache[tststr].Params[idx].CName, txInput, TstGrp.TestSups[tststr][idx].SqlColValue)
+						TstGrp.TestParamValue[tststr][idx] = reflect.Indirect(r).FieldByName(txTestCache[tststr].Params[idx].TCName).Interface()
+						fmt.Printf("\nin case t:TCName:%s, \ninput:%+v, \nValue:%+v", txTestCache[tststr].Params[idx].TCName, txInput, TstGrp.TestParamValue[tststr][idx])
 					case "c": // customer fields
 						//fmt.Printf("\nin case c:%s, %+v, %+v", txTestCache[tststr].Params[idx].CName, custAttMap[cID], custAttMap[cID][txTestCache[tststr].Params[idx].CName])
 						TstGrp.TestParamValue[tststr][idx] = custAttMap[cID][txTestCache[tststr].Params[idx].CName]
@@ -1829,14 +1886,27 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 				// fmt.Printf("\nChannel received:%+v", sqlRes)
 				for idx, _ := range TstGrp.TestParamValue[tsts] { // assign column value
 					if txTestCache[tsts].Params[idx].QueryType == 4 {
-						TstGrp.TestParamValue[tsts][idx] = acctAttMap[aID][paramColMap[txTestCache[tsts].Params[idx].Param].AcctCol].(int64) -
-							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]]
+						switch txTestCache[tsts].Params[idx].Scalar {
+						case "SUM":
+							r := reflect.ValueOf(txInput)
+							TstGrp.TestParamValue[tsts][idx] = acctAttMap[aID][paramColMap[txTestCache[tsts].Params[idx].Param].AcctCol].(int64) -
+								sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]] +
+								int64(reflect.Indirect(r).FieldByName(txTestCache[tsts].Params[idx].TCName).Interface().(int))
+
+						case "CNT":
+							TstGrp.TestParamValue[tsts][idx] = acctAttMap[aID][paramColMap[txTestCache[tsts].Params[idx].Param].AcctCol].(int64) -
+								sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]] + 1
+
+						}
 					} else if txTestCache[tsts].Params[idx].QueryType == 5 {
+						r := reflect.ValueOf(txInput)
 						tVal := acctAttMap[aID][paramColMap[txTestCache[tsts].Params[idx].Param].AcctCol].(int64) -
-							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]]
+							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[txTestCache[tsts].Params[idx].SqlColStr]] +
+							int64(reflect.Indirect(r).FieldByName(txTestCache[tsts].Params[idx].TCName).Interface().(int))
+
 						cntParamStr := "CNT(" + txTestCache[tsts].Params[idx].CName + ")"
 						tCnt := acctAttMap[aID][paramColMap[cntParamStr].AcctCol].(int64) -
-							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[paramColMap[cntParamStr].AcctCol]]
+							sqlRes[TstGrp.SQLPeriodIdx[txTestCache[tsts].Period.Value].Idx][TstGrp.GrpParamIdx[paramColMap[cntParamStr].AcctCol]] + 1
 						if tCnt == 0 {
 							TstGrp.TestParamValue[tsts][idx] = 0
 						} else {
@@ -1884,6 +1954,8 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 			//fmt.Printf("\nparameters: %+v", paras)
 
 			// evaluate test results
+			tRes.Score = "s"
+
 			for scoreletter, mapstr := range txTestCache[tststr].ScoreMap {
 				expression, err := govaluate.NewEvaluableExpression(mapstr)
 				eval, err := expression.Evaluate(paras)
@@ -1892,7 +1964,9 @@ func processAcctTests(TstGrp *TestGrp, cID int64, aID int64, t time.Time, txInpu
 				}
 
 				if eval.(bool) {
-					tRes.Score = scoreletter
+					if scoreRank[scoreletter] > scoreRank[tRes.Score] {
+						tRes.Score = scoreletter
+					}
 				}
 			}
 
